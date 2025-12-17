@@ -1,0 +1,203 @@
+import os
+import json
+import time
+import requests
+import re
+from datetime import datetime
+from dotenv import load_dotenv
+
+# 加载配置
+load_dotenv()
+API_KEY = os.getenv("RAPIDAPI_KEY")
+API_HOST = os.getenv("RAPIDAPI_HOST")
+
+if not API_KEY or not API_HOST:
+    print("❌ 错误: 请检查 .env 文件中的 API Key 和 Host 设置")
+    exit()
+
+# 基础配置
+BASE_URL = f"https://{API_HOST}"
+HEADERS = {
+    "X-RapidAPI-Key": API_KEY,
+    "X-RapidAPI-Host": API_HOST,
+    "Content-Type": "application/json"
+}
+
+# --- ⚙️ 抓取设置 ---
+MAX_PAGES = 10     # 想抓多少页？(每页约40条)
+TIME_SLEEP = 2     # 翻页间隔秒数 (防封)
+
+def convert_to_markdown(username, json_path):
+    """将 JSON 转换为 Markdown"""
+    print(f"⚙️ 正在将数据转换为 Markdown...")
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            all_pages = json.load(f) # 注意：这里读入的是一个列表（多页数据）
+        
+        # 准备 Markdown 头部
+        md = f"# Twitter Archive: @{username}\n\n"
+        md += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n\n"
+
+        total_tweets = 0
+        
+        # 遍历每一页数据
+        for page_data in all_pages:
+            tweets = []
+            try:
+                # 适配 Twttr API 结构: result -> timeline -> instructions
+                instructions = page_data.get('result', {}).get('timeline', {}).get('instructions', [])
+                for instr in instructions:
+                    if instr.get('type') == 'TimelineAddEntries':
+                        tweets = instr.get('entries', [])
+                        break
+            except:
+                continue
+
+            # 遍历单页里的推文
+            for entry in tweets:
+                if not entry.get('entryId', '').startswith('tweet-'): continue
+                try:
+                    res = entry['content']['itemContent']['tweet_results']['result']
+                    legacy = res.get('legacy') or res
+                    
+                    text = legacy.get('full_text', '').replace('\n', '\n> ')
+                    date = legacy.get('created_at', '')
+                    tid = legacy.get('id_str', '')
+                    
+                    # 写入 Markdown
+                    md += f"### 📅 {date}\n\n> {text}\n\n"
+                    md += f"🔗 [Link](https://twitter.com/{username}/status/{tid})\n\n---\n\n"
+                    total_tweets += 1
+                except: continue
+
+        # 保存 Markdown
+        md_path = json_path.replace('.json', '.md')
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(md)
+        print(f"✨ Markdown 笔记已生成: {md_path} (共 {total_tweets} 条)")
+            
+    except Exception as e:
+        print(f"❌ 转换 Markdown 失败: {e}")
+
+def save_to_json(username, all_data):
+    """保存所有页的数据"""
+    output_dir = "data_sources"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    filename = os.path.join(output_dir, f"twitter_{username}_rapid.json")
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(all_data, f, ensure_ascii=False, indent=2)
+    
+    print(f"✅ 数据已保存: {filename} (共 {len(all_data)} 页)")
+    
+    # 自动转换
+    convert_to_markdown(username, filename)
+
+def get_user_id(username):
+    """获取用户 ID (适配 Twttr API)"""
+    print(f"🔍 正在查询 @{username} 的 ID...")
+    url = f"{BASE_URL}/user" 
+    params = {"username": username}
+
+    try:
+        response = requests.get(url, headers=HEADERS, params=params)
+        data = response.json()
+        
+        # 尝试多层提取
+        try:
+            return data.get("result", {}).get("data", {}).get("user", {}).get("result", {}).get("rest_id")
+        except: pass
+        
+        if "rest_id" in data: return data["rest_id"]
+        if "id" in data: return data["id"]
+        
+        print(f"⚠️ 未找到 ID: {str(data)[:100]}...")
+        return None
+    except Exception as e:
+        print(f"❌ ID 查询出错: {e}")
+        return None
+
+def extract_cursor(data):
+    """从一页数据中提取翻页用的 cursor"""
+    # 1. 尝试从标准结构提取
+    try:
+        instructions = data.get('result', {}).get('timeline', {}).get('instructions', [])
+        for instr in instructions:
+            if instr.get('type') == 'TimelineAddEntries':
+                entries = instr.get('entries', [])
+                for entry in entries:
+                    if str(entry.get('entryId', '')).startswith('cursor-bottom-'):
+                        return entry['content']['itemContent']['value']
+    except: pass
+    
+    # 2. 如果结构变了，用正则暴力提取
+    data_str = json.dumps(data)
+    # 寻找 value 字段中以 DAA 开头的长字符串
+    matches = re.findall(r'"value"\s*:\s*"(DAA[^"]+)"', data_str)
+    if matches:
+        return matches[-1] # 返回最后一个 cursor (通常是下一页)
+        
+    return None
+
+def fetch_all_tweets(username, user_id):
+    """主抓取循环"""
+    print(f"🚀 开始抓取...")
+    url = f"{BASE_URL}/user-tweets"
+    
+    all_pages = []
+    cursor = None
+    page = 0
+    
+    while page < MAX_PAGES:
+        page += 1
+        print(f"📄 第 {page} 页...", end="", flush=True)
+        
+        params = {
+            "user": user_id,
+            "include_replies": "false",
+            "count": 40
+        }
+        if cursor:
+            params["cursor"] = cursor
+            
+        try:
+            response = requests.get(url, headers=HEADERS, params=params)
+            
+            if response.status_code != 200:
+                print(f" ❌ 失败: {response.status_code}")
+                break
+                
+            data = response.json()
+            all_pages.append(data)
+            print(" ✅", end="")
+            
+            # 找下一页的 cursor
+            next_cursor = extract_cursor(data)
+            if next_cursor and next_cursor != cursor:
+                cursor = next_cursor
+                print(f" (找到下一页)")
+                time.sleep(TIME_SLEEP)
+            else:
+                print(" (已到末尾)")
+                break
+                
+        except Exception as e:
+            print(f"\n❌ 出错: {e}")
+            break
+            
+    # 循环结束后保存
+    if all_pages:
+        save_to_json(username, all_pages)
+    else:
+        print("❌ 未抓取到数据")
+
+if __name__ == "__main__":
+    target_user = input("请输入用户名: ").strip()
+    if target_user:
+        uid = get_user_id(target_user)
+        if uid:
+            print(f"✅ ID: {uid}")
+            fetch_all_tweets(target_user, uid)
+        else:
+            print("❌ 无法获取 ID")
