@@ -26,6 +26,9 @@ HEADERS = {
 # --- ⚙️ 抓取设置 ---
 MAX_PAGES = 10     # 想抓多少页？(每页约40条)
 TIME_SLEEP = 2     # 翻页间隔秒数 (防封)
+STATE_PATH = os.path.join("state", "sync_state.json")
+DATA_DIR = os.path.join("data_sources", "x")
+
 
 def convert_to_markdown(username, json_path):
     """将 JSON 转换为 Markdown"""
@@ -139,6 +142,163 @@ def extract_cursor(data):
         return matches[-1] # 返回最后一个 cursor (通常是下一页)
         
     return None
+
+def _load_state() -> dict:
+    try:
+        if os.path.exists(STATE_PATH):
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def _save_state(state: dict) -> None:
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def _get_x_users_state(state: dict) -> dict:
+    state.setdefault("x_users", {})
+    if not isinstance(state["x_users"], dict):
+        state["x_users"] = {}
+    return state["x_users"]
+
+def _extract_tweets_from_page(page_data: dict) -> list:
+    tweets = []
+    try:
+        instructions = page_data.get("result", {}).get("timeline", {}).get("instructions", [])
+        entries = []
+        for instr in instructions:
+            if instr.get("type") == "TimelineAddEntries":
+                entries = instr.get("entries", [])
+                break
+
+        for entry in entries:
+            if not str(entry.get("entryId", "")).startswith("tweet-"):
+                continue
+            try:
+                res = entry["content"]["itemContent"]["tweet_results"]["result"]
+                legacy = res.get("legacy") or res
+                tid = legacy.get("id_str") or ""
+                if not tid:
+                    continue
+                tweets.append({
+                    "id": str(tid),
+                    "created_at": legacy.get("created_at", ""),
+                    "text": (legacy.get("full_text", "") or "").strip(),
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return tweets
+
+def fetch_updates(username: str, max_pages: int = 2) -> int:
+    """
+    增量抓取：只抓“上次最新 tweet id”之后的新贴文。
+    进度写入 state/sync_state.json -> x_users[username].latest_id
+    新内容落盘到 data_sources/x/<username>/tweets_<timestamp>.md（利于 ingest 增量）
+    返回：新增 tweet 数
+    """
+    username = (username or "").strip().lstrip("@")
+    if not username:
+        print("⚠️ [X] username 为空，跳过")
+        return 0
+
+    state = _load_state()
+    x_users = _get_x_users_state(state)
+    u = x_users.setdefault(username, {})
+
+    user_id = u.get("user_id")
+    if not user_id:
+        user_id = get_user_id(username)
+        if not user_id:
+            print(f"❌ [X] 无法获取 @{username} 的 user_id")
+            return 0
+        u["user_id"] = user_id
+
+    last_seen_id = u.get("latest_id")
+    print(f"🐦 [X] @{username} 增量同步开始 (last_seen_id={last_seen_id})")
+
+    url = f"{BASE_URL}/user-tweets"
+    cursor = None
+    raw_pages = []
+    collected = []
+    stop = False
+
+    for _ in range(max_pages):
+        params = {"user": user_id, "include_replies": "false", "count": 40}
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = requests.get(url, headers=HEADERS, params=params)
+        if resp.status_code != 200:
+            print(f"❌ [X] 请求失败: {resp.status_code} {resp.text[:120]}")
+            break
+
+        data = resp.json()
+        raw_pages.append(data)
+
+        for t in _extract_tweets_from_page(data):
+            if last_seen_id and t["id"] == last_seen_id:
+                stop = True
+                break
+            collected.append(t)
+
+        if stop:
+            break
+
+        next_cursor = extract_cursor(data)
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+        time.sleep(TIME_SLEEP)
+
+    # 去重
+    uniq = []
+    seen = set()
+    for t in collected:
+        if t["id"] in seen:
+            continue
+        seen.add(t["id"])
+        uniq.append(t)
+
+    if not uniq:
+        print(f"💤 [X] @{username} 没有新贴文")
+        return 0
+
+    # 更新 latest_id（取最大）
+    try:
+        latest_id = str(max(int(t["id"]) for t in uniq))
+    except Exception:
+        latest_id = uniq[0]["id"]
+
+    u["latest_id"] = latest_id
+    u["last_sync_at"] = datetime.now().isoformat(timespec="seconds")
+    _save_state(state)
+
+    # 写新增文件（每次一个新 md）
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(DATA_DIR, username)
+    os.makedirs(out_dir, exist_ok=True)
+
+    md_path = os.path.join(out_dir, f"tweets_{ts}.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(f"# X Incremental: @{username}\n\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"New tweets: {len(uniq)}\n\n---\n\n")
+        for t in uniq:
+            text = (t["text"] or "").replace("\n", "\n> ")
+            f.write(f"### 📅 {t['created_at']}\n\n> {text}\n\n")
+            f.write(f"🔗 [Link](https://twitter.com/{username}/status/{t['id']})\n\n---\n\n")
+
+    raw_path = os.path.join(out_dir, f"raw_{ts}.json")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        json.dump(raw_pages, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ [X] @{username} 新增 {len(uniq)} 条，已写入: {md_path}")
+    return len(uniq)
 
 def fetch_all_tweets(username, user_id):
     """主抓取循环"""
