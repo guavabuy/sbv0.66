@@ -5,3 +5,4 @@ __pycache__/
 data_sources/
 outputs/
 state/
+.DS_Store
