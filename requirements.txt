@@ -3,3 +3,6 @@ langchain-google-genai
 langchain-community
 google-search-results
 python-dotenv
+requests
+schedule
+python-telegram-bot

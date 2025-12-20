@@ -7,7 +7,6 @@ from ingest import ingest
 from profile_update import update_user_profile
 import os
 from dotenv import load_dotenv
-from connectors.x_sync import fetch_updates as fetch_x_updates
 
 load_dotenv()
 X_USERS = [u.strip().lstrip("@") for u in os.getenv("X_USERNAMES", "").split(",") if u.strip()]
@@ -17,8 +16,6 @@ def daily_job():
     print(f"🕒 当前时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     try:
-        new_notes_count = fetch_updates()
-
         new_notes_count = fetch_updates() or 0
 
         new_x_count = 0

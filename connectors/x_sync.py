@@ -206,12 +206,9 @@ def fetch_updates(username: str, max_pages: int = 2) -> int:
     if not username:
         print("⚠️ [X] username 为空，跳过")
         return 0
-<<<<<<< HEAD
-=======
     if not API_KEY or not API_HOST:
         print("⚠️ [X] 缺少 RAPIDAPI_KEY 或 RAPIDAPI_HOST，跳过同步")
         return 0
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
 
     state = _load_state()
     x_users = _get_x_users_state(state)

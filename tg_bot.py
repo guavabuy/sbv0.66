@@ -12,34 +12,15 @@ Telegram 接入脚本（Guest 模式）
 
 import asyncio
 import os
-<<<<<<< HEAD
-from typing import Dict, List
-=======
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
 
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-<<<<<<< HEAD
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-
-import main as sb_main  # 直接导入模块，避免某些常量不存在导致 ImportError
-from memory_retriever import get_recent_corpus_snippets
-
-load_dotenv()
-
-# 兼容：有些 main.py 里可能没定义 PROMPT_SEP / normalize_reply 等，这里做兜底
-PROMPT_SEP = getattr(sb_main, "PROMPT_SEP", "-" * 20)
-get_dynamic_system_prompt = getattr(sb_main, "get_dynamic_system_prompt")
-read_url_tool = getattr(sb_main, "read_url_tool")
-search_tool = getattr(sb_main, "search_tool")
-system_health_check = getattr(sb_main, "system_health_check")
-llm = getattr(sb_main, "llm")
-=======
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from conversation_logger import log_telegram_turn
 
@@ -53,7 +34,6 @@ except Exception:  # pragma: no cover
 from memory_retriever import get_recent_corpus_snippets
 from friend_mode_config import get_tg_friend_mode_enabled, get_thresholds
 
-from pathlib import Path
 _DOTENV_PATH = Path(__file__).resolve().parent / ".env"
 # 测试/沙盒里 .env 可能不可读（权限/过滤），这里不要阻塞 import
 try:  # pragma: no cover
@@ -72,7 +52,6 @@ read_url_tool = getattr(sb_main, "read_url_tool", _missing_main)
 search_tool = getattr(sb_main, "search_tool", _missing_main)
 system_health_check = getattr(sb_main, "system_health_check", _missing_main)
 llm = getattr(sb_main, "llm", None)
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
 
 def _default_normalize_reply(reply):
     if not isinstance(reply, list):
@@ -83,10 +62,8 @@ def _default_normalize_reply(reply):
             clean_text += item["text"]
     return clean_text
 
-normalize_reply = getattr(sb_main, "normalize_reply", _default_normalize_reply)
+normalize_reply = getattr(sb_main, "normalize_reply", _default_normalize_reply) if sb_main else _default_normalize_reply
 
-<<<<<<< HEAD
-=======
 def _tg_is_cjk(s: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", s or ""))
 
@@ -229,8 +206,6 @@ def generate_tg_reply(text: str, messages: List) -> Tuple[str, Dict[str, Any], L
     reply = normalize_reply(response.content)
     return reply, {}, [response]
 
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
-
 # 每个 chat 保留多少“轮”上下文（不落盘，纯内存）
 MAX_TURNS = int(os.getenv("TG_MAX_TURNS", "20"))  # 20 轮≈40条消息（user+assistant）
 
@@ -309,12 +284,8 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = update.effective_chat.id
     SESSIONS[chat_id] = [SystemMessage(content=SYSTEM_PROMPT)]
-<<<<<<< HEAD
-    await update.message.reply_text("已重置本次会话上下文 ✅")
-=======
     reply = "已重置本次会话上下文 ✅"
     await update.message.reply_text(reply)
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -340,46 +311,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         messages.append(HumanMessage(content=text))
 
         try:
-<<<<<<< HEAD
-            response = await asyncio.to_thread(llm.invoke, messages)
-        except Exception as e:
-            messages.pop()  # 回滚本次 user 输入
-            await update.message.reply_text(f"❌ AI 调用错误: {e}")
-            return
-
-        if getattr(response, "tool_calls", None):
-            tool_outputs = []
-            for tool_call in response.tool_calls:
-                if tool_call["name"] == "read_url_tool":
-                    res = read_url_tool.invoke(tool_call["args"])
-                elif tool_call["name"] == "search_tool":
-                    res = search_tool.invoke(tool_call["args"])
-                else:
-                    res = "未知工具"
-                tool_outputs.append(ToolMessage(tool_call_id=tool_call["id"], content=str(res)))
-
-            try:
-                final_response = await asyncio.to_thread(llm.invoke, messages + [response] + tool_outputs)
-            except Exception as e:
-                await update.message.reply_text(f"❌ 工具链调用错误: {e}")
-                return
-
-            reply = normalize_reply(final_response.content)
-
-            # 只存内存，不写入任何 outputs 文件
-            messages.append(response)
-            messages.extend(tool_outputs)
-            messages.append(final_response)
-        else:
-            reply = normalize_reply(response.content)
-            messages.append(response)
-
-        SESSIONS[chat_id] = _trim_session(messages)
-        await _send_long_text(update, reply if reply else "（空响应）")
-
-
-def main() -> None:
-=======
             reply, meta, extra_msgs = await asyncio.to_thread(generate_tg_reply, text, messages)
         except Exception as e:
             messages.pop()  # 回滚本次 user 输入
@@ -410,8 +341,6 @@ def main() -> None:
         load_dotenv(dotenv_path=_DOTENV_PATH)
     except Exception:
         pass
-
->>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("❌ 缺少 TELEGRAM_BOT_TOKEN，请在 .env 中配置。")
