@@ -6,14 +6,15 @@ import re
 from datetime import datetime
 from dotenv import load_dotenv
 
-# 加载配置
-load_dotenv()
+# 加载配置（容错：避免在测试/CI 环境因 .env 不可读导致 import 崩溃）
+try:
+    from pathlib import Path
+    _BASE = Path(__file__).resolve().parents[1]
+    load_dotenv(dotenv_path=_BASE / ".env")
+except Exception:
+    pass
 API_KEY = os.getenv("RAPIDAPI_KEY")
 API_HOST = os.getenv("RAPIDAPI_HOST")
-
-if not API_KEY or not API_HOST:
-    print("❌ 错误: 请检查 .env 文件中的 API Key 和 Host 设置")
-    exit()
 
 # 基础配置
 BASE_URL = f"https://{API_HOST}"
@@ -205,6 +206,12 @@ def fetch_updates(username: str, max_pages: int = 2) -> int:
     if not username:
         print("⚠️ [X] username 为空，跳过")
         return 0
+<<<<<<< HEAD
+=======
+    if not API_KEY or not API_HOST:
+        print("⚠️ [X] 缺少 RAPIDAPI_KEY 或 RAPIDAPI_HOST，跳过同步")
+        return 0
+>>>>>>> d7e1b9a (archive: friend_mode + tg integration + smoke test)
 
     state = _load_state()
     x_users = _get_x_users_state(state)
@@ -302,6 +309,9 @@ def fetch_updates(username: str, max_pages: int = 2) -> int:
 
 def fetch_all_tweets(username, user_id):
     """主抓取循环"""
+    if not API_KEY or not API_HOST:
+        print("⚠️ [X] 缺少 RAPIDAPI_KEY 或 RAPIDAPI_HOST，跳过抓取")
+        return
     print(f"🚀 开始抓取...")
     url = f"{BASE_URL}/user-tweets"
     

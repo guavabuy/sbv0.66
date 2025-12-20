@@ -4,7 +4,13 @@ import requests
 import datetime
 from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from pathlib import Path
+    _BASE = Path(__file__).resolve().parents[1]
+    load_dotenv(dotenv_path=_BASE / ".env")
+except Exception:
+    # 在某些环境（权限/无 .env）下允许导入；真实运行时可依赖环境变量
+    pass
 NOTION_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
@@ -55,6 +61,9 @@ def fetch_page_content(page_id: str) -> str:
 
 def fetch_updates() -> int:
     print(">>> 🔄 开始智能同步 Notion...")
+    if not NOTION_KEY or not DATABASE_ID:
+        print("⚠️ [Notion] 缺少 NOTION_API_KEY 或 NOTION_DATABASE_ID，跳过同步")
+        return 0
 
     last_synced_time = ""
     if os.path.exists(STATE_FILE):
