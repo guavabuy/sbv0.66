@@ -27,8 +27,27 @@ HEADERS = {
 # --- ⚙️ 抓取设置 ---
 MAX_PAGES = 10     # 想抓多少页？(每页约40条)
 TIME_SLEEP = 2     # 翻页间隔秒数 (防封)
-STATE_PATH = os.path.join("state", "sync_state.json")
-DATA_DIR = os.path.join("data_sources", "x")
+# 注意：ingest 也会使用 state/sync_state.json 存“文件哈希状态”，不能和 connector 混用
+STATE_PATH = str(_BASE / "state" / "x_state.json")
+DATA_DIR = str(_BASE / "data" / "raw" / "x")
+LOG_DIR = str(_BASE / "logs" / "x")
+
+
+def _safe_filename(s: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-+" else "_" for c in s)
+
+
+def _parse_twitter_created_at(ts: str) -> datetime:
+    """
+    RapidAPI 返回的 created_at 通常是:
+      "Mon Dec 18 08:19:00 +0000 2025"
+    """
+    if not ts:
+        return datetime.now()
+    try:
+        return datetime.strptime(ts, "%a %b %d %H:%M:%S %z %Y")
+    except Exception:
+        return datetime.now()
 
 
 def convert_to_markdown(username, json_path):
@@ -85,7 +104,8 @@ def convert_to_markdown(username, json_path):
 
 def save_to_json(username, all_data):
     """保存所有页的数据"""
-    output_dir = "data_sources"
+    # 原始 API dump + 聚合 Markdown 仅用于人类回看，避免污染 ingest 的 raw 入口
+    output_dir = os.path.join(LOG_DIR, (username or "").strip().lstrip("@") or "unknown")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
@@ -195,11 +215,56 @@ def _extract_tweets_from_page(page_data: dict) -> list:
         pass
     return tweets
 
+
+def _write_tweet_as_md(*, username: str, tweet: dict) -> str:
+    """
+    统一 raw 规范：每条 tweet 一个文件，头部元信息与 notion 类似（纯 markdown，不引入 YAML 依赖）。
+    返回写入的文件路径。
+    """
+    username = (username or "").strip().lstrip("@")
+    tid = str(tweet.get("id") or "").strip()
+    created_at_raw = tweet.get("created_at", "") or ""
+    created_dt = _parse_twitter_created_at(created_at_raw)
+    # 统一使用 ISO，用于文件名排序与后续处理
+    created_iso = created_dt.isoformat()
+    text = (tweet.get("text") or "").strip()
+
+    title = text.replace("\n", " ").strip()
+    if not title:
+        title = f"@{username} tweet {tid}"
+    title = title[:80]
+
+    out_dir = os.path.join(DATA_DIR, username)
+    os.makedirs(out_dir, exist_ok=True)
+
+    safe_ts = _safe_filename(created_iso)
+    safe_title = _safe_filename(title)[:80]
+    md_path = os.path.join(out_dir, f"{safe_ts}_{tid}_{safe_title}.md")
+
+    url = f"https://twitter.com/{username}/status/{tid}" if tid else ""
+    doc = (
+        f"# {title}\n"
+        f"- source: x\n"
+        f"- x_username: {username}\n"
+        f"- tweet_id: {tid}\n"
+        f"- created_at: {created_iso}\n"
+        f"- url: {url}\n\n"
+        f"{text}\n"
+    )
+
+    # 避免重复写入导致 ingest 认为文件“变了”（hash 变化）
+    if os.path.exists(md_path):
+        return md_path
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    return md_path
+
 def fetch_updates(username: str, max_pages: int = 2) -> int:
     """
     增量抓取：只抓“上次最新 tweet id”之后的新贴文。
-    进度写入 state/sync_state.json -> x_users[username].latest_id
-    新内容落盘到 data_sources/x/<username>/tweets_<timestamp>.md（利于 ingest 增量）
+    进度写入 state/x_state.json -> x_users[username].latest_id
+    新内容落盘到 data/raw/x/<username>/<created_at>_<tweet_id>_<title>.md（与 Notion raw 统一：每条内容一个文件）
     返回：新增 tweet 数
     """
     username = (username or "").strip().lstrip("@")
@@ -282,26 +347,31 @@ def fetch_updates(username: str, max_pages: int = 2) -> int:
     u["last_sync_at"] = datetime.now().isoformat(timespec="seconds")
     _save_state(state)
 
-    # 写新增文件（每次一个新 md）
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(DATA_DIR, username)
-    os.makedirs(out_dir, exist_ok=True)
+    # 写新增文件：每条 tweet 一个 md（统一 raw 格式）
+    for t in uniq:
+        _write_tweet_as_md(username=username, tweet=t)
 
+    # 额外写一个“聚合预览”md（可读性好；不写入 data/raw，避免 ingest 重复入库）
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(LOG_DIR, username)
+    os.makedirs(out_dir, exist_ok=True)
     md_path = os.path.join(out_dir, f"tweets_{ts}.md")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# X Incremental: @{username}\n\n")
         f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"New tweets: {len(uniq)}\n\n---\n\n")
         for t in uniq:
-            text = (t["text"] or "").replace("\n", "\n> ")
-            f.write(f"### 📅 {t['created_at']}\n\n> {text}\n\n")
-            f.write(f"🔗 [Link](https://twitter.com/{username}/status/{t['id']})\n\n---\n\n")
+            text = (t.get("text") or "").replace("\n", "\n> ")
+            f.write(f"### 📅 {t.get('created_at','')}\n\n> {text}\n\n")
+            f.write(f"🔗 [Link](https://twitter.com/{username}/status/{t.get('id','')})\n\n---\n\n")
 
     raw_path = os.path.join(out_dir, f"raw_{ts}.json")
     with open(raw_path, "w", encoding="utf-8") as f:
         json.dump(raw_pages, f, ensure_ascii=False, indent=2)
 
-    print(f"✅ [X] @{username} 新增 {len(uniq)} 条，已写入: {md_path}")
+    print(f"✅ [X] @{username} 新增 {len(uniq)} 条")
+    print(f"   - per-tweet raw: {os.path.join(DATA_DIR, username)}/")
+    print(f"   - preview md: {md_path}")
     return len(uniq)
 
 def fetch_all_tweets(username, user_id):

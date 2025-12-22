@@ -2,11 +2,12 @@ import os
 import json
 import requests
 import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
+# 项目根目录（connectors/ 的上一级）
+_BASE = Path(__file__).resolve().parents[1]
 try:
-    from pathlib import Path
-    _BASE = Path(__file__).resolve().parents[1]
     load_dotenv(dotenv_path=_BASE / ".env")
 except Exception:
     # 在某些环境（权限/无 .env）下允许导入；真实运行时可依赖环境变量
@@ -15,7 +16,7 @@ NOTION_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 # ✅ 避免和 ingest 的 sync_state.json 冲突
-STATE_FILE = "state/notion_state.json"
+STATE_FILE = str(_BASE / "state" / "notion_state.json")
 
 headers = {
     "Authorization": f"Bearer {NOTION_KEY}",
@@ -73,77 +74,98 @@ def fetch_updates() -> int:
             print(f"🕒 上次同步时间: {last_synced_time}")
 
     if not last_synced_time:
-        print("🆕 初次运行，默认回溯 7 天...")
-        last_synced_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+        # 初次运行：全量同步（抓取历史所有正文）
+        # 用 1970-01-01 作为“最早时间”，避免 Notion 对非常早的年份兼容性问题
+        print("🆕 初次运行：将进行 Notion 全量同步（抓取历史所有正文）...")
+        last_synced_dt = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
     else:
         last_synced_dt = _parse_iso(last_synced_time)
 
-    payload = {
-        "filter": {
-            "timestamp": "last_edited_time",
-            "last_edited_time": {"on_or_after": last_synced_dt.isoformat()}
-        }
-    }
-
     query_url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
-    response = requests.post(query_url, json=payload, headers=headers, timeout=30)
-
-    if response.status_code != 200:
-        print(f"❌ 数据库连接失败: {response.text}")
-        return 0
-
-    results = response.json().get("results", [])
-    if not results:
-        print("✅ 没有发现新内容。")
-        current_time_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"last_synced_time": current_time_iso}, f, ensure_ascii=False, indent=2)
-        return 0
-
-    out_dir = os.path.join("data_sources", "notion")
+    out_dir = str(_BASE / "data" / "raw" / "notion")
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"📦 发现 {len(results)} 个变动，正在逐个抓取正文...")
+    # Notion 数据库 query 有分页（最多 100/页）
+    start_cursor = None
+    total_candidates = 0
     new_count = 0
     newest_dt = last_synced_dt
 
-    for page in results:
-        page_id = page["id"]
-        last_edit = page["last_edited_time"]
-        last_edit_dt = _parse_iso(last_edit)
+    while True:
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "timestamp": "last_edited_time",
+                "last_edited_time": {"on_or_after": last_synced_dt.isoformat()},
+            },
+            # 稳定排序：从旧到新，方便观察全量同步进度
+            "sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}],
+        }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
 
-        # 二次保险
-        if last_edit_dt <= last_synced_dt:
-            continue
+        response = requests.post(query_url, json=payload, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"❌ 数据库连接失败: {response.text}")
+            return 0
 
-        props = page.get("properties", {})
-        title = "无标题"
-        for _, val in props.items():
-            if val.get("id") == "title" and val.get("title"):
-                title = val["title"][0]["plain_text"]
-                break
+        data = response.json()
+        results = data.get("results", [])
+        has_more = bool(data.get("has_more"))
+        start_cursor = data.get("next_cursor")
 
-        print(f"   -> 正在读取: {title} ...")
-        content = fetch_page_content(page_id)
+        if not results and total_candidates == 0:
+            print("✅ 没有发现新内容。")
+            current_time_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"last_synced_time": current_time_iso}, f, ensure_ascii=False, indent=2)
+            return 0
 
-        # ✅ 每篇笔记一个文件：避免 ingest 反复把旧内容吃进去
-        safe_ts = _safe_filename(last_edit_dt.isoformat())
-        safe_title = _safe_filename(title)[:80]
-        file_path = os.path.join(out_dir, f"{safe_ts}_{page_id}_{safe_title}.md")
+        total_candidates += len(results)
+        if results:
+            print(f"📦 本页发现 {len(results)} 条候选笔记（累计 {total_candidates}），正在抓取正文...")
 
-        doc = (
-            f"# {title}\n"
-            f"- notion_page_id: {page_id}\n"
-            f"- last_edited_time: {last_edit}\n\n"
-            f"{content}\n"
-        )
+        for page in results:
+            page_id = page["id"]
+            last_edit = page["last_edited_time"]
+            last_edit_dt = _parse_iso(last_edit)
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(doc)
+            # 二次保险：Notion 过滤是 on_or_after（包含断点时刻本身）
+            if last_edit_dt <= last_synced_dt:
+                continue
 
-        new_count += 1
-        if last_edit_dt > newest_dt:
-            newest_dt = last_edit_dt
+            props = page.get("properties", {})
+            title = "无标题"
+            for _, val in props.items():
+                if val.get("id") == "title" and val.get("title"):
+                    title = val["title"][0]["plain_text"]
+                    break
+
+            print(f"   -> 正在读取: {title} ...")
+            content = fetch_page_content(page_id)
+
+            # ✅ 每篇笔记一个文件：避免 ingest 反复把旧内容吃进去
+            safe_ts = _safe_filename(last_edit_dt.isoformat())
+            safe_title = _safe_filename(title)[:80]
+            file_path = os.path.join(out_dir, f"{safe_ts}_{page_id}_{safe_title}.md")
+
+            doc = (
+                f"# {title}\n"
+                f"- source: notion\n"
+                f"- notion_page_id: {page_id}\n"
+                f"- last_edited_time: {last_edit}\n\n"
+                f"{content}\n"
+            )
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(doc)
+
+            new_count += 1
+            if last_edit_dt > newest_dt:
+                newest_dt = last_edit_dt
+
+        if not has_more:
+            break
 
     # 只要有新内容，就把断点推进到最新一篇的时间
     if new_count > 0:
