@@ -2,11 +2,50 @@ import os
 import json
 import time
 import random
+import sys
+import re
+from pathlib import Path
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 CORPUS_PATH = "data/corpus.jsonl"
 PROFILE_PATH = "data/user_profile.md"
 PROFILE_STATE = "state/profile_state.json"
+
+def env_bool(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y", "on"))
+
+
+def env_int(name: str, default: str = "0") -> int:
+    try:
+        return int(os.getenv(name, default) or default)
+    except Exception:
+        return int(default)
+
+def _parse_dt(s: str):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _infer_dt_from_notion_filename(file_path: str):
+    m = re.search(
+        r"/notion/([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}_[0-9]{2}_[0-9]{2}[^_/]*)_",
+        (file_path or "").replace("\\", "/"),
+    )
+    if not m:
+        return None
+    ts = m.group(1).replace("_", ":")
+    if "+" not in ts and "Z" not in ts:
+        ts = ts + "+00:00"
+    return _parse_dt(ts)
 
 def _is_overload_error(e: Exception) -> bool:
     msg = str(e)
@@ -114,6 +153,10 @@ def update_user_profile():
     if not chunks:
         print("💤 没有新增 chunk，跳过画像更新。")
         return False
+
+    # 精简版：不做权重/衰减 rerank，只做“最多取前 N 条新增证据”避免提示词过长
+    top_n = env_int("SB_PROFILE_EVIDENCE_TOP_N", "40")
+    chunks = chunks[: int(top_n)]
 
     old_profile = ""
     if os.path.exists(PROFILE_PATH):

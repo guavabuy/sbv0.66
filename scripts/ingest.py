@@ -2,9 +2,17 @@ import os
 import json
 import hashlib
 import argparse
+import sys
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Iterable, List, Dict, Any, Optional, Tuple
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from core.weighting import score_depth, compute_cog_weight
 
 DATA_DIR = "data/raw"
 STATE_PATH = "state/sync_state.json"
@@ -233,7 +241,12 @@ def ingest(full: bool = False) -> Dict[str, Any]:
             # split into chunks
             chunks = chunk_text(item_text)
             for i, ck in enumerate(chunks):
+                # 激活：使用人格引擎的深度评分逻辑
+                ds = score_depth(ck, meta=extra)
                 w = compute_weight(source, ck)
+                # 认知权重 (基于深度评分)
+                cw = compute_cog_weight(ds, alpha=0.5) # 默认开启 0.5 强度加成
+                
                 uid = make_uid(source, rel, i, ck)
                 new_chunks.append(MemoryChunk(
                     uid=uid,
@@ -243,7 +256,7 @@ def ingest(full: bool = False) -> Dict[str, Any]:
                     ingested_at=now_iso(),
                     weight=w,
                     text=ck,
-                    meta=extra,
+                    meta={**extra, "depth_score": ds, "cog_weight": cw},
                 ))
 
         # update state for this file
@@ -253,7 +266,8 @@ def ingest(full: bool = False) -> Dict[str, Any]:
     if new_chunks:
         with open(OUT_CORPUS, "a", encoding="utf-8") as f:
             for mc in new_chunks:
-                f.write(json.dumps(asdict(mc), ensure_ascii=False) + "\n")
+                obj = asdict(mc)
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     state["files"] = seen_files
     save_state(state)

@@ -1,6 +1,6 @@
 ## SBV Second Brain（v0.73 / 12.22版）
 
-一个可落盘、可增量更新的个人 Second Brain：同步 Notion/X → ingest 成语料库 → 增量更新画像 → 用 `SecondBrain`（self/friend）统一回答（可联网）。
+一个可落盘、可增量更新的个人 Second Brain：同步 Notion/X → ingest 成语料库 → 增量更新画像 → 用 `SecondBrain`（self/friend）统一回答。
 
 ### 目录结构（核心）
 
@@ -8,7 +8,7 @@
   - `apps/main.py`：CLI（self）
   - `apps/tg_bot.py`：Telegram（friend）
   - `apps/scheduler.py`：每日 12:00 定时任务（静默写日志）
-- **`core/`**：SecondBrain / prompt_loader / privacy / tools / processor
+- **`core/`**：SecondBrain / prompt_loader / privacy / processor（精简版：不含检索/联网 tools）
 - **`connectors/`**：Notion/X 同步 → 写入 `data/raw/`
 - **`prompts/`**：Prompt 模板（`.md`）
 - **`scripts/`**：数据管道脚本
@@ -39,7 +39,6 @@ pip install -r requirements.txt
 
 - **必填**：
   - `GOOGLE_API_KEY`：对话/画像更新
-  - `SERPAPI_API_KEY`：联网搜索（可选，但建议配）
 - **可选（Notion）**：`NOTION_API_KEY`、`NOTION_DATABASE_ID`
 - **可选（X）**：`RAPIDAPI_KEY`、`RAPIDAPI_HOST`、`X_USERNAMES=mjpmaa,naval`
 - **可选（Telegram）**：`TELEGRAM_BOT_TOKEN`
@@ -85,3 +84,17 @@ nohup python3 -m apps.scheduler >/dev/null 2>&1 &
 ```
 
 （日志见 `logs/scheduler.log`；可用 `SB_SCHEDULE_AT=12:00` 改时间。）
+
+### 目录逻辑（精简版）
+
+- **`apps/`**：入口层（CLI / TG / scheduler），只负责收发与调度
+- **`connectors/`**：同步外部数据源（Notion/X）→ 写入 `data/raw/`
+- **`scripts/`**：离线数据管道（ingest / profile_update）
+- **`core/`**：最小“SecondBrain 核心”
+  - `core/brain.py`：上下文加载 + prompt 渲染 + 调用 LLM（不含检索/联网 tools）
+  - `core/privacy.py`：隐私闸门（friend 永不读 `brain_memory.md`）
+  - `core/prompt_loader.py` / `core/modes.py`：prompt 模板加载与映射
+- **`extras/`**：已下线/可选能力的“收纳箱”（不影响主流程）
+  - `extras/legacy_core/`：旧的检索/权重/遥测实现（需要时再启用/迁回）
+  - `extras/tools/`：联网工具实现（当前 core 不使用）
+  - `extras/tests/`：旧权重/检索单测
